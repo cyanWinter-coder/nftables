@@ -106,7 +106,27 @@ const (
 	MonitorEventTypeDelSetElem MonitorEventType = unix.NFT_MSG_DELSETELEM
 	MonitorEventTypeNewObj     MonitorEventType = unix.NFT_MSG_NEWOBJ
 	MonitorEventTypeDelObj     MonitorEventType = unix.NFT_MSG_DELOBJ
-	MonitorEventTypeOOB        MonitorEventType = math.MaxInt // out of band event
+	// MonitorEventTypeNewGen marks the boundary of a committed transaction.
+	MonitorEventTypeNewGen MonitorEventType = unix.NFT_MSG_NEWGEN
+	// MonitorEventTypeOOB is an out-of-band event that does not correspond to a
+	// ruleset change. The Error field carries details.
+	MonitorEventTypeOOB MonitorEventType = math.MaxInt // out of band event
+	// MonitorEventTypeReconnect is published by [ResilientMonitor] when the
+	// netlink connection was lost and a reconnection attempt starts. Error
+	// carries the receive error that triggered the reconnect.
+	MonitorEventTypeReconnect MonitorEventType = math.MaxInt - 1
+	// MonitorEventTypeResync is published by [ResilientMonitor] after a full
+	// snapshot-based resynchronization has completed.
+	MonitorEventTypeResync MonitorEventType = math.MaxInt - 2
+	// MonitorEventTypeTruncated is published by [ResilientMonitor] when the
+	// internal replay buffer or the subscriber channel overflowed. Incremental
+	// events may have been dropped; the monitor stays live and will regain a
+	// guaranteed-consistent state at the next MonitorEventTypeResync.
+	MonitorEventTypeTruncated MonitorEventType = math.MaxInt - 3
+	// MonitorEventTypeStale is published by [ResilientMonitor] when an event
+	// batch with a ruleset generation ID older than (or equal to) the last
+	// applied one was received and skipped.
+	MonitorEventTypeStale MonitorEventType = math.MaxInt - 4
 )
 
 // A MonitorEvent represents a single change received via a [Monitor].
