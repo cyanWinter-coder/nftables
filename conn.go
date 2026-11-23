@@ -47,6 +47,21 @@ type Conn struct {
 	sockOptions  []SockOption
 	lastID       uint32
 	allocatedIDs uint32
+	// nameIdx is the local index of named objects (tables, chains, named
+	// objects, sets, flowtables) as of the last successfully committed
+	// ApplyRuleset transaction or Flush of single-object commands. It is used
+	// for declarative name resolution and is only replaced after a batch
+	// commits successfully, never halfway through an update. nil means no
+	// declarative transaction has run yet.
+	nameIdx *nameIndex
+	// pendingIndex holds name-index changes recorded by the single-object
+	// primitives while buffering. They are folded into nameIdx only on a
+	// successful flush.
+	pendingIndex []indexChange
+	// declarativeFlush is set while ApplyRuleset drives a flush, in which
+	// case the flush must not touch the name index: the declarative path
+	// publishes its own resolved index and restores pending state itself.
+	declarativeFlush bool
 }
 
 type netlinkMessage struct {
@@ -281,12 +296,26 @@ func (cc *Conn) FlushWithGenID(genID uint32) error {
 
 // flush sends all buffered commands in a single batch to nftables. If genID is
 // non-zero, it will be included in the batch messages.
-func (cc *Conn) flush(genID uint32) error {
+func (cc *Conn) flush(genID uint32) (flushErr error) {
 	cc.mu.Lock()
 	defer func() {
 		cc.messages = nil
 		cc.allocatedIDs = 0
 		cc.err = nil
+		if cc.declarativeFlush {
+			// ApplyRuleset owns index publication and pending-state
+			// restoration for this batch.
+			cc.mu.Unlock()
+			return
+		}
+		// The local name index may only advance once the batch is known to
+		// have committed; on failure the pending single-object changes are
+		// dropped so the index keeps describing the previous state.
+		if flushErr == nil {
+			cc.applyPendingIndexLocked()
+		} else {
+			cc.pendingIndex = nil
+		}
 		cc.mu.Unlock()
 	}()
 	if len(cc.messages) == 0 {

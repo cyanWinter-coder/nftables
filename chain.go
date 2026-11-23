@@ -147,6 +147,12 @@ func (cc *Conn) AddChain(c *Chain) *Chain {
 		},
 		Data: append(extraHeader(uint8(c.Table.Family), 0), data...),
 	})
+	cc.trackIndexUpsert(objectKey{
+		family: c.Table.Family,
+		table:  c.Table.Name,
+		kind:   refChain,
+		name:   c.Name,
+	}, c)
 
 	return c
 }
@@ -170,6 +176,12 @@ func (cc *Conn) delChain(c *Chain, destroy bool) {
 			Flags: netlink.Request,
 		},
 		Data: append(extraHeader(uint8(c.Table.Family), 0), data...),
+	})
+	cc.trackIndexDelete(objectKey{
+		family: c.Table.Family,
+		table:  c.Table.Name,
+		kind:   refChain,
+		name:   c.Name,
 	})
 }
 

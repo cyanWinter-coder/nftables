@@ -767,6 +767,13 @@ func (cc *Conn) AddSet(s *Set, vals []SetElement) error {
 		return err
 	}
 
+	cc.trackIndexUpsert(objectKey{
+		family: s.Table.Family,
+		table:  s.Table.Name,
+		kind:   refSet,
+		name:   s.Name,
+	}, s)
+
 	return nil
 }
 
@@ -784,6 +791,12 @@ func (cc *Conn) DelSet(s *Set) {
 			Flags: netlink.Request,
 		},
 		Data: append(extraHeader(uint8(s.Table.Family), 0), data...),
+	})
+	cc.trackIndexDelete(objectKey{
+		family: s.Table.Family,
+		table:  s.Table.Name,
+		kind:   refSet,
+		name:   s.Name,
 	})
 }
 

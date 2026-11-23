@@ -131,6 +131,12 @@ func (cc *Conn) AddObj(o Obj) Obj {
 		},
 		Data: append(extraHeader(uint8(o.family()), 0), cc.marshalAttr(attrs)...),
 	})
+	cc.trackIndexUpsert(objectKey{
+		family: o.family(),
+		table:  o.table().Name,
+		kind:   refObject,
+		name:   o.name(),
+	}, o)
 	return o
 }
 
@@ -152,6 +158,12 @@ func (cc *Conn) DeleteObject(o Obj) {
 			Flags: netlink.Request,
 		},
 		Data: append(extraHeader(uint8(o.family()), 0), data...),
+	})
+	cc.trackIndexDelete(objectKey{
+		family: o.family(),
+		table:  o.table().Name,
+		kind:   refObject,
+		name:   o.name(),
 	})
 }
 

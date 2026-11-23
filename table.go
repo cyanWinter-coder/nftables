@@ -106,6 +106,7 @@ func (cc *Conn) delTable(t *Table, hdrType netlink.HeaderType) {
 		},
 		Data: append(extraHeader(uint8(t.Family), 0), data...),
 	})
+	cc.trackIndexTableDelete(tableKey{family: t.Family, name: t.Name})
 }
 
 func (cc *Conn) addTable(t *Table, flag netlink.HeaderFlags) *Table {
@@ -133,6 +134,7 @@ func (cc *Conn) addTable(t *Table, flag netlink.HeaderFlags) *Table {
 		},
 		Data: append(extraHeader(uint8(t.Family), 0), data...),
 	})
+	cc.trackIndexTableUpsert(tableKey{family: t.Family, name: t.Name}, t)
 	return t
 }
 

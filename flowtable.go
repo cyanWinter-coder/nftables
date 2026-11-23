@@ -141,6 +141,12 @@ func (cc *Conn) AddFlowtable(f *Flowtable) *Flowtable {
 		},
 		Data: append(extraHeader(uint8(f.Table.Family), 0), data...),
 	})
+	cc.trackIndexUpsert(objectKey{
+		family: f.Table.Family,
+		table:  f.Table.Name,
+		kind:   refFlowtable,
+		name:   f.Name,
+	}, f)
 
 	return f
 }
@@ -160,6 +166,12 @@ func (cc *Conn) DelFlowtable(f *Flowtable) {
 			Flags: netlink.Request,
 		},
 		Data: append(extraHeader(uint8(f.Table.Family), 0), data...),
+	})
+	cc.trackIndexDelete(objectKey{
+		family: f.Table.Family,
+		table:  f.Table.Name,
+		kind:   refFlowtable,
+		name:   f.Name,
 	})
 }
 
