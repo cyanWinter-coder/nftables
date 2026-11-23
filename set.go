@@ -398,6 +398,11 @@ func (cc *Conn) SetAddElements(s *Set, vals []SetElement) error {
 
 // SetDeleteElements deletes data points from an nftables set.
 func (cc *Conn) SetDeleteElements(s *Set, vals []SetElement) error {
+	// Serialize with concurrent batch replaces of the same set: a delete must
+	// not interleave with an in-flight SetReplaceElements.
+	unlock := cc.lockSet(s)
+	defer unlock()
+
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 	if s.Anonymous {
@@ -431,34 +436,54 @@ func (cc *Conn) SetDestroyElements(s *Set, vals []SetElement) error {
 const maxElemBatchSize = math.MaxUint16 - 1024
 
 func (cc *Conn) appendElemList(s *Set, vals []SetElement, msgType nftMsgType) error {
+	msgs, _, err := cc.elemListMessages(s, vals, msgType)
+	if err != nil {
+		return err
+	}
+	cc.messages = append(cc.messages, msgs...)
+	return nil
+}
+
+// elemListMessages encodes vals into one or more netlink messages of the
+// given message type, splitting the elements so that no single message
+// exceeds maxElemBatchSize. For each returned message, the corresponding
+// entry in ranges holds the half-open index range of vals the message
+// carries, which allows mapping a failed message back to element positions.
+func (cc *Conn) elemListMessages(s *Set, vals []SetElement, msgType nftMsgType) ([]netlinkMessage, [][2]int, error) {
 	if len(vals) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	var elements []netlink.Attribute
 	batchSize := 0
+	batchStart := 0
 	var batches [][]netlink.Attribute
+	var ranges [][2]int
 
 	for i, v := range vals {
 		encodedItem, err := cc.marshalSetElement(s, &v)
 		if err != nil {
-			return fmt.Errorf("marshal item %d: %v", i, err)
+			return nil, nil, fmt.Errorf("marshal item %d: %v", i, err)
 		}
 
 		itemSize := unix.NLA_HDRLEN + len(encodedItem)
 		if batchSize+itemSize > maxElemBatchSize {
 			batches = append(batches, elements)
+			ranges = append(ranges, [2]int{batchStart, i})
 			elements = nil
 			batchSize = 0
+			batchStart = i
 		}
 		elements = append(elements, netlink.Attribute{Type: uint16(i+1) | unix.NLA_F_NESTED, Data: encodedItem})
 		batchSize += itemSize
 	}
 	batches = append(batches, elements)
+	ranges = append(ranges, [2]int{batchStart, len(vals)})
 
+	msgs := make([]netlinkMessage, 0, len(batches))
 	for _, batch := range batches {
 		encodedElem, err := netlink.MarshalAttributes(batch)
 		if err != nil {
-			return fmt.Errorf("marshal elements: %v", err)
+			return nil, nil, fmt.Errorf("marshal elements: %v", err)
 		}
 
 		message := []netlink.Attribute{
@@ -468,7 +493,7 @@ func (cc *Conn) appendElemList(s *Set, vals []SetElement, msgType nftMsgType) er
 			{Type: unix.NFTA_SET_ELEM_LIST_ELEMENTS | unix.NLA_F_NESTED, Data: encodedElem},
 		}
 
-		cc.messages = append(cc.messages, netlinkMessage{
+		msgs = append(msgs, netlinkMessage{
 			Header: netlink.Header{
 				Type:  msgType.HeaderType(),
 				Flags: netlink.Request | netlink.Create,
@@ -476,7 +501,7 @@ func (cc *Conn) appendElemList(s *Set, vals []SetElement, msgType nftMsgType) er
 			Data: append(extraHeader(uint8(s.Table.Family), 0), cc.marshalAttr(message)...),
 		})
 	}
-	return nil
+	return msgs, ranges, nil
 }
 
 func (cc *Conn) marshalSetElement(s *Set, e *SetElement) ([]byte, error) {
@@ -791,17 +816,22 @@ func (cc *Conn) DelSet(s *Set) {
 func (cc *Conn) FlushSet(s *Set) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
+	cc.messages = append(cc.messages, cc.delAllSetElemsMessage(s))
+}
+
+// delAllSetElemsMessage builds the message deleting all elements of s.
+func (cc *Conn) delAllSetElemsMessage(s *Set) netlinkMessage {
 	data := cc.marshalAttr([]netlink.Attribute{
 		{Type: unix.NFTA_SET_TABLE, Data: []byte(s.Table.Name + "\x00")},
 		{Type: unix.NFTA_SET_NAME, Data: []byte(s.Name + "\x00")},
 	})
-	cc.messages = append(cc.messages, netlinkMessage{
+	return netlinkMessage{
 		Header: netlink.Header{
 			Type:  nftMsgDelSetElem.HeaderType(),
 			Flags: netlink.Request,
 		},
 		Data: append(extraHeader(uint8(s.Table.Family), 0), data...),
-	})
+	}
 }
 
 var (

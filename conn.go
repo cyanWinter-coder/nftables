@@ -47,6 +47,18 @@ type Conn struct {
 	sockOptions  []SockOption
 	lastID       uint32
 	allocatedIDs uint32
+
+	// setLocks serializes whole-set operations (SetReplaceElements,
+	// SetDeleteElements) per set, so that a batch replace cannot interleave
+	// with a concurrent replace or delete of the same set. Lock ordering:
+	// a per-set lock is always acquired before mu, never the other way round.
+	setLocks [setLockStripes]sync.Mutex
+	// mirrorsMu guards mirrors.
+	mirrorsMu sync.RWMutex
+	// mirrors holds the locally mirrored contents of sets as committed by the
+	// last successful SetReplaceElements call, keyed by setKey. It is rolled
+	// back (left untouched) when the kernel rejects a replace.
+	mirrors map[string][]SetElement
 }
 
 type netlinkMessage struct {
