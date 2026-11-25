@@ -189,6 +189,13 @@ func (cc *Conn) getRules(t *Table, c *Chain, msgType nftMsgType, handle uint64) 
 func (cc *Conn) newRule(r *Rule, op ruleOperation) *Rule {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
+
+	oldID, oldHandle := r.ID, r.Handle
+	cc.trackIdentityLocked(r, func() {
+		r.ID = oldID
+		r.Handle = oldHandle
+	})
+
 	exprAttrs := make([]netlink.Attribute, len(r.Exprs))
 	for idx, expr := range r.Exprs {
 		exprAttrs[idx] = netlink.Attribute{
@@ -268,14 +275,15 @@ func (cc *Conn) newRule(r *Rule, op ruleOperation) *Rule {
 		Data: append(extraHeader(uint8(r.Table.Family), 0), msgData...),
 		rule: ruleRef,
 	})
+	cc.indexUpsertLocked(ruleLocalKey(r), r)
 
 	return r
 }
 
-func (r *Rule) handleCreateReply(reply netlink.Message) error {
+func parseRuleCreateReply(reply netlink.Message) (uint64, error) {
 	ad, err := netlink.NewAttributeDecoder(reply.Data[4:])
 	if err != nil {
-		return err
+		return 0, err
 	}
 	ad.ByteOrder = binary.BigEndian
 	var handle uint64
@@ -286,10 +294,18 @@ func (r *Rule) handleCreateReply(reply netlink.Message) error {
 		}
 	}
 	if ad.Err() != nil {
-		return ad.Err()
+		return 0, ad.Err()
 	}
 	if handle == 0 {
-		return fmt.Errorf("missing rule handle in create reply")
+		return 0, fmt.Errorf("missing rule handle in create reply")
+	}
+	return handle, nil
+}
+
+func (r *Rule) handleCreateReply(reply netlink.Message) error {
+	handle, err := parseRuleCreateReply(reply)
+	if err != nil {
+		return err
 	}
 	r.Handle = handle
 	r.ID = 0
@@ -356,6 +372,7 @@ func (cc *Conn) delRule(r *Rule, destroy bool) error {
 		},
 		Data: append(extraHeader(uint8(r.Table.Family), 0), data...),
 	})
+	cc.indexDeleteLocked(ruleLocalKey(r), r)
 
 	return nil
 }

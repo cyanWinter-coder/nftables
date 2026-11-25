@@ -131,6 +131,7 @@ func (cc *Conn) AddObj(o Obj) Obj {
 		},
 		Data: append(extraHeader(uint8(o.family()), 0), cc.marshalAttr(attrs)...),
 	})
+	cc.indexUpsertLocked(objLocalKey(o), o)
 	return o
 }
 
@@ -153,6 +154,7 @@ func (cc *Conn) DeleteObject(o Obj) {
 		},
 		Data: append(extraHeader(uint8(o.family()), 0), data...),
 	})
+	cc.indexDeleteLocked(objLocalKey(o), o)
 }
 
 // GetObj is a legacy method that return all Obj that belongs

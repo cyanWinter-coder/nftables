@@ -106,6 +106,7 @@ func (cc *Conn) delTable(t *Table, hdrType netlink.HeaderType) {
 		},
 		Data: append(extraHeader(uint8(t.Family), 0), data...),
 	})
+	cc.indexDeleteLocked(tableLocalKey(t), t)
 }
 
 func (cc *Conn) addTable(t *Table, flag netlink.HeaderFlags) *Table {
@@ -133,6 +134,7 @@ func (cc *Conn) addTable(t *Table, flag netlink.HeaderFlags) *Table {
 		},
 		Data: append(extraHeader(uint8(t.Family), 0), data...),
 	})
+	cc.indexUpsertLocked(tableLocalKey(t), t)
 	return t
 }
 

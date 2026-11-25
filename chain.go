@@ -147,6 +147,7 @@ func (cc *Conn) AddChain(c *Chain) *Chain {
 		},
 		Data: append(extraHeader(uint8(c.Table.Family), 0), data...),
 	})
+	cc.indexUpsertLocked(chainLocalKey(c), c)
 
 	return c
 }
@@ -171,6 +172,7 @@ func (cc *Conn) delChain(c *Chain, destroy bool) {
 		},
 		Data: append(extraHeader(uint8(c.Table.Family), 0), data...),
 	})
+	cc.indexDeleteLocked(chainLocalKey(c), c)
 }
 
 // DelChain deletes the specified Chain. See also

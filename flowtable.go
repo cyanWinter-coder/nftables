@@ -141,6 +141,7 @@ func (cc *Conn) AddFlowtable(f *Flowtable) *Flowtable {
 		},
 		Data: append(extraHeader(uint8(f.Table.Family), 0), data...),
 	})
+	cc.indexUpsertLocked(flowtableLocalKey(f), f)
 
 	return f
 }
@@ -161,6 +162,7 @@ func (cc *Conn) DelFlowtable(f *Flowtable) {
 		},
 		Data: append(extraHeader(uint8(f.Table.Family), 0), data...),
 	})
+	cc.indexDeleteLocked(flowtableLocalKey(f), f)
 }
 
 func (cc *Conn) ListFlowtables(t *Table) ([]*Flowtable, error) {

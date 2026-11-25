@@ -587,6 +587,12 @@ func (cc *Conn) AddSet(s *Set, vals []SetElement) error {
 		return err
 	}
 
+	oldID, oldName := s.ID, s.Name
+	cc.trackIdentityLocked(s, func() {
+		s.ID = oldID
+		s.Name = oldName
+	})
+
 	if s.ID == 0 {
 		s.ID = cc.allocateTransactionID()
 		if s.Anonymous {
@@ -760,6 +766,7 @@ func (cc *Conn) AddSet(s *Set, vals []SetElement) error {
 		},
 		Data: append(extraHeader(uint8(s.Table.Family), 0), cc.marshalAttr(tableInfo)...),
 	})
+	cc.indexUpsertLocked(setLocalKey(s), s)
 
 	// Set the values of the set if initial values were provided.
 	if err := cc.appendElemList(s, vals, nftMsgNewSetElem); err != nil {
@@ -785,6 +792,7 @@ func (cc *Conn) DelSet(s *Set) {
 		},
 		Data: append(extraHeader(uint8(s.Table.Family), 0), data...),
 	})
+	cc.indexDeleteLocked(setLocalKey(s), s)
 }
 
 // FlushSet deletes all data points from an nftables set.

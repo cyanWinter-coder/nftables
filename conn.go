@@ -21,6 +21,7 @@ import (
 	"math"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
@@ -47,12 +48,32 @@ type Conn struct {
 	sockOptions  []SockOption
 	lastID       uint32
 	allocatedIDs uint32
+
+	activeBatch    *Batch
+	nextBatchID    uint64
+	localIndex     *localObjectIndex
+	pendingDeletes map[localObjectKey]any
+	rollback       *rollbackState
+
+	// commitOwner records the goroutine running commitBatchLocked. It lets a
+	// re-entrant Commit/Flush/Begin from a test dial function reject itself
+	// instead of deadlocking on mu.
+	commitOwner atomic.Int64
 }
 
 type netlinkMessage struct {
-	Header netlink.Header
-	Data   []byte
-	rule   *Rule
+	Header     netlink.Header
+	Data       []byte
+	rule       *Rule
+	echoHandle uint64
+}
+
+// sentMessageInfo pairs a sent batch message with its position in the Conn's
+// buffered operation slice.
+type sentMessageInfo struct {
+	batchID uint64
+	index   int
+	message netlinkMessage
 }
 
 // ConnOption is an option to change the behavior of the nftables Conn returned by Open.
@@ -147,6 +168,10 @@ func (cc *Conn) netlinkConn() (*netlink.Conn, netlinkCloser, error) {
 // netlinkConnUnderLock works like netlinkConn but must be called while holding
 // the Conn.mu lock.
 func (cc *Conn) netlinkConnUnderLock() (*netlink.Conn, netlinkCloser, error) {
+	if cc.activeBatch != nil && cc.activeBatch.handle != nil {
+		handle := cc.activeBatch.handle
+		return handle, func() error { return nil }, nil
+	}
 	if cc.nlconn != nil {
 		return cc.nlconn, func() error { return nil }, nil
 	}
@@ -279,65 +304,28 @@ func (cc *Conn) FlushWithGenID(genID uint32) error {
 	return cc.flush(genID)
 }
 
-// flush sends all buffered commands in a single batch to nftables. If genID is
-// non-zero, it will be included in the batch messages.
+// flush is the historical single submission path for an implicitly bounded
+// batch. Explicit Batch values go through the same commitBatchLocked path.
 func (cc *Conn) flush(genID uint32) error {
+	if owner := cc.commitOwner.Load(); owner != 0 && owner == currentGoroutineIDUID447() {
+		return fmt.Errorf("%w: call Batch.Commit instead", ErrNestedCommit)
+	}
 	cc.mu.Lock()
-	defer func() {
-		cc.messages = nil
-		cc.allocatedIDs = 0
-		cc.err = nil
-		cc.mu.Unlock()
-	}()
-	if len(cc.messages) == 0 {
-		// Messages were already programmed, returning nil
-		return nil
-	}
-	if cc.err != nil {
-		return cc.err
-	}
-	conn, closer, err := cc.netlinkConnUnderLock()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = closer() }()
+	defer cc.mu.Unlock()
 
-	if err := cc.enlargeWriteBuffer(conn); err != nil {
-		return err
-	}
-	if err := cc.enlargeReadBuffer(conn); err != nil {
-		return err
+	if cc.activeBatch != nil && cc.activeBatch.state == BatchOpen {
+		return fmt.Errorf("%w: call Batch.Commit instead", ErrNestedCommit)
 	}
 
-	batch, err := batch(cc.messages, genID)
-	if err != nil {
-		return err
+	cc.nextBatchID++
+	b := &Batch{
+		Conn:  cc,
+		id:    cc.nextBatchID,
+		state: BatchOpen,
+		genID: genID,
 	}
-
-	sentMsgs, err := conn.SendMessages(batch)
-	if err != nil {
-		return fmt.Errorf("SendMessages: %w", err)
-	}
-
-	var firstErr error
-
-	seqToMsgMap := cc.getSeqToMsgMap(sentMsgs)
-
-	for reply, err := range cc.receiveSeq(conn) {
-		if err != nil {
-			if firstErr == nil {
-				firstErr = cc.handleReceiveError(seqToMsgMap, err)
-			}
-			// Continue receiving further messages even after an error.
-			continue
-		}
-
-		if err := cc.handleEchoReply(seqToMsgMap, reply); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	return firstErr
+	cc.activeBatch = b
+	return cc.commitBatchLocked(b)
 }
 
 // withOpError inspects err to see if it is a *netlink.OpError. If it is, it
@@ -361,63 +349,90 @@ func (cc *Conn) withOpError(err error, fn func(*netlink.OpError) error) error {
 // parses its nftMsgType, and returns a new error that includes the nftMsgType
 // string representation. If err is not a *netlink.OpError, it is simply
 // returned as-is.
-func (cc *Conn) handleReceiveError(msgs map[uint32]netlinkMessage, err error) error {
-	if err := cc.withOpError(err, func(opErr *netlink.OpError) error {
-		msg, ok := msgs[opErr.Sequence]
+func (cc *Conn) handleReceiveError(msgs map[uint32]sentMessageInfo, batchID uint64, err error) error {
+	mapped := cc.withOpError(err, func(opErr *netlink.OpError) error {
+		info, ok := msgs[opErr.Sequence]
 		if !ok {
 			return opErr
 		}
-		nftMsgType, parseErr := parseNftMsgType(msg.Header.Type)
+		nftMsgType, parseErr := parseNftMsgType(info.message.Header.Type)
 		if parseErr != nil {
 			return opErr
 		}
 		return fmt.Errorf("%s: %w", nftMsgType.String(), opErr)
-	}); err != nil {
-		return fmt.Errorf("receive: %w", err)
+	})
+	if mapped == nil {
+		return nil
 	}
+	mapped = fmt.Errorf("receive: %w", mapped)
 
-	return nil
+	var opErr *netlink.OpError
+	ack := &BatchACKError{
+		BatchID: batchID,
+		Index:   -1,
+		Err:     mapped,
+	}
+	if errors.As(err, &opErr) {
+		ack.Sequence = opErr.Sequence
+		if info, ok := msgs[opErr.Sequence]; ok {
+			ack.Index = info.index
+			if nftMsgType, parseErr := parseNftMsgType(info.message.Header.Type); parseErr == nil {
+				ack.MessageType = nftMsgType.String()
+			}
+		}
+	}
+	return ack
 }
 
 // getSeqToMsgMap returns a map of the cc.messages that were sent, indexed by
 // their sequence number as included in the sent netlink messages. The returned
 // map will not include the batch begin and end messages.
-func (cc *Conn) getSeqToMsgMap(sentMsgs []netlink.Message) map[uint32]netlinkMessage {
-	seqToMsgMap := make(map[uint32]netlinkMessage)
+func (cc *Conn) getSeqToMsgMap(sentMsgs []netlink.Message, batchID uint64) map[uint32]sentMessageInfo {
+	seqToMsgMap := make(map[uint32]sentMessageInfo)
 	for i, msg := range sentMsgs {
 		if i == 0 || i == len(sentMsgs)-1 {
 			// Skip batch begin and end messages.
 			continue
 		}
-		if i-1 >= len(cc.messages) {
+		messageIndex := i - 1
+		if messageIndex >= len(cc.messages) {
 			// Should not happen, but be defensive.
 			break
 		}
 		// Update the header in the original message, as the sequence number
 		// and possibly other fields have been updated by the the underlying
 		// netlink library.
-		cc.messages[i-1].Header = msg.Header
-		seqToMsgMap[msg.Header.Sequence] = cc.messages[i-1]
+		cc.messages[messageIndex].Header = msg.Header
+		seqToMsgMap[msg.Header.Sequence] = sentMessageInfo{
+			batchID: batchID,
+			index:   messageIndex,
+			message: cc.messages[messageIndex],
+		}
 	}
 
 	return seqToMsgMap
 }
 
-func (cc *Conn) handleEchoReply(seqToMsgMap map[uint32]netlinkMessage, reply netlink.Message) error {
+func (cc *Conn) handleEchoReply(seqToMsgMap map[uint32]sentMessageInfo, reply netlink.Message) error {
 	sentMsg, ok := seqToMsgMap[reply.Header.Sequence]
 	if !ok {
 		// We don't have a record of sending this message, ignore.
 		return nil
 	}
 
-	if sentMsg.Header.Flags&netlink.Echo == 0 {
+	if sentMsg.message.Header.Flags&netlink.Echo == 0 {
 		return nil
 	}
 
 	switch reply.Header.Type {
 	case newRuleHeaderType:
 		// The only messages which set the echo flag are rule create messages.
-		return sentMsg.rule.handleCreateReply(reply)
+		handle, err := parseRuleCreateReply(reply)
+		if err != nil {
+			return err
+		}
+		cc.messages[sentMsg.index].echoHandle = handle
+		return nil
 	default:
 		return nil
 	}
