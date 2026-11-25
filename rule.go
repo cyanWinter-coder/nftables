@@ -189,11 +189,24 @@ func (cc *Conn) getRules(t *Table, c *Chain, msgType nftMsgType, handle uint64) 
 func (cc *Conn) newRule(r *Rule, op ruleOperation) *Rule {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
+
+	if cc.err != nil {
+		return r
+	}
+
+	// Encode every expression before mutating cc.messages. Otherwise a
+	// failure at expression N could leave a partially assembled rule buffered.
 	exprAttrs := make([]netlink.Attribute, len(r.Exprs))
-	for idx, expr := range r.Exprs {
+	for idx, expression := range r.Exprs {
+		exprBytes, err := expr.Marshal(byte(r.Table.Family), expression)
+		if err != nil {
+			err = fmt.Errorf("rule.exprs[%d] (%T): %w", idx, expression, err)
+			cc.setErr(err)
+			return r
+		}
 		exprAttrs[idx] = netlink.Attribute{
 			Type: unix.NLA_F_NESTED | unix.NFTA_LIST_ELEM,
-			Data: cc.marshalExpr(byte(r.Table.Family), expr),
+			Data: exprBytes,
 		}
 	}
 
@@ -258,6 +271,12 @@ func (cc *Conn) newRule(r *Rule, op ruleOperation) *Rule {
 		msgData = append(msgData, cc.marshalAttr([]netlink.Attribute{
 			{Type: nfta_rule_position_id, Data: binaryutil.BigEndian.PutUint32(r.PositionID)},
 		})...)
+	}
+
+	// Do not buffer a partially encoded rule if any attribute helper recorded
+	// an error while assembling msgData.
+	if cc.err != nil {
+		return r
 	}
 
 	cc.messages = append(cc.messages, netlinkMessage{

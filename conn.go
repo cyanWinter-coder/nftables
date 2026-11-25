@@ -289,12 +289,14 @@ func (cc *Conn) flush(genID uint32) error {
 		cc.err = nil
 		cc.mu.Unlock()
 	}()
+	if cc.err != nil {
+		// Check this before the empty-messages fast path: an encoding error
+		// intentionally results in no partially buffered message.
+		return cc.err
+	}
 	if len(cc.messages) == 0 {
 		// Messages were already programmed, returning nil
 		return nil
-	}
-	if cc.err != nil {
-		return cc.err
 	}
 	conn, closer, err := cc.netlinkConnUnderLock()
 	if err != nil {
@@ -506,7 +508,7 @@ func (cc *Conn) marshalAttr(attrs []netlink.Attribute) []byte {
 func (cc *Conn) marshalExpr(fam byte, e expr.Any) []byte {
 	b, err := expr.Marshal(fam, e)
 	if err != nil {
-		cc.setErr(err)
+		cc.setErr(fmt.Errorf("expr (%T): %w", e, err))
 		return nil
 	}
 	return b

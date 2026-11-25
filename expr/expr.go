@@ -17,6 +17,8 @@ package expr
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/internal/parseexprfunc"
@@ -67,11 +69,33 @@ func init() {
 
 // Marshal serializes the specified expression into a byte slice.
 func Marshal(fam byte, e Any) ([]byte, error) {
-	return e.marshal(fam)
+	if e == nil {
+		return nil, newPathError("expr", 0, errors.New("nil expression"))
+	}
+	b, err := e.marshal(fam)
+	if err != nil {
+		var pathErr *PathError
+		if errors.As(err, &pathErr) {
+			return nil, err
+		}
+		return nil, newPathError(fmt.Sprintf("expr:%T", e), 0, err)
+	}
+	return b, nil
 }
 
 func MarshalExprData(fam byte, e Any) ([]byte, error) {
-	return e.marshalData(fam)
+	if e == nil {
+		return nil, newPathError("expr.data", 0, errors.New("nil expression"))
+	}
+	b, err := e.marshalData(fam)
+	if err != nil {
+		var pathErr *PathError
+		if errors.As(err, &pathErr) {
+			return nil, err
+		}
+		return nil, newPathError(fmt.Sprintf("expr-data:%T", e), 0, err)
+	}
+	return b, nil
 }
 
 // Unmarshal fills an expression from the specified byte slice.
@@ -115,12 +139,13 @@ func exprsFromBytes(fam byte, ad *netlink.AttributeDecoder) ([]Any, error) {
 					exprs = append(exprs, e)
 				}
 			case unix.NFTA_EXPR_DATA:
-				e := exprFromName(name)
-				if e == nil {
-					// TODO: introduce an opaque expression type so that users know
-					// something is here.
-					continue // unsupported expression type
+				// notrack has no data payload; its empty expression is appended
+				// when NFTA_EXPR_NAME is decoded. Avoid adding a second node if a
+				// zero-length DATA attribute is present.
+				if name == "notrack" {
+					continue
 				}
+				e := exprFromName(name)
 				ad.Do(func(b []byte) error {
 					if err := Unmarshal(fam, b, e); err != nil {
 						return err
@@ -211,6 +236,10 @@ func exprFromName(name string) Any {
 		e = &Fib{}
 	case "numgen":
 		e = &Numgen{}
+	default:
+		// Preserve unknown/future expressions instead of silently dropping
+		// their attributes during parsing and read-modify-write cycles.
+		e = &Generic{Name: name}
 	}
 	return e
 }

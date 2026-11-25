@@ -16,6 +16,8 @@ package expr
 
 import (
 	"encoding/binary"
+	"fmt"
+	"sort"
 
 	"github.com/google/nftables/binaryutil"
 	"github.com/mdlayher/netlink"
@@ -370,21 +372,37 @@ func (c *CtTimeout) marshal(fam byte) ([]byte, error) {
 }
 
 func (c *CtTimeout) marshalData(fam byte) ([]byte, error) {
-	var policy CtStatePolicyTimeout
+	var defaults CtStatePolicyTimeout
 	switch c.L4Proto {
 	case unix.IPPROTO_UDP:
-		policy = CtStateUDPTimeoutDefaults
+		defaults = CtStateUDPTimeoutDefaults
 	default:
-		policy = CtStateTCPTimeoutDefaults
+		defaults = CtStateTCPTimeoutDefaults
 	}
 
+	policy := make(CtStatePolicyTimeout, len(defaults)+len(c.Policy))
+	for k, v := range defaults {
+		policy[k] = v
+	}
 	for k, v := range c.Policy {
 		policy[k] = v
 	}
 
-	var policyAttrs []netlink.Attribute
-	for k, v := range policy {
-		policyAttrs = append(policyAttrs, netlink.Attribute{Type: k + 1, Data: binaryutil.BigEndian.PutUint32(v)})
+	// Maps have randomized iteration order. Emit policy attributes in state
+	// order so repeated marshaling is byte-for-byte deterministic and matches
+	// the stable order used by libnftnl/nft.
+	keys := make([]uint16, 0, len(policy))
+	for k := range policy {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+
+	policyAttrs := make([]netlink.Attribute, 0, len(keys))
+	for _, k := range keys {
+		policyAttrs = append(policyAttrs, netlink.Attribute{
+			Type: k + 1,
+			Data: binaryutil.BigEndian.PutUint32(policy[k]),
+		})
 	}
 	policyData, err := netlink.MarshalAttributes(policyAttrs)
 	if err != nil {
@@ -414,18 +432,30 @@ func (c *CtTimeout) unmarshal(fam byte, data []byte) error {
 			c.L4Proto = ad.Uint8()
 		case NFTA_CT_TIMEOUT_DATA:
 			decoder, err := netlink.NewAttributeDecoder(ad.Bytes())
-			decoder.ByteOrder = binary.BigEndian
 			if err != nil {
-				return err
+				return fmt.Errorf("ct timeout policy: %w", err)
 			}
-			for decoder.Next() {
+			decoder.ByteOrder = binary.BigEndian
+
+			if c.Policy == nil {
+				var defaults CtStatePolicyTimeout
 				switch c.L4Proto {
 				case unix.IPPROTO_UDP:
-					c.Policy = CtStateUDPTimeoutDefaults
+					defaults = CtStateUDPTimeoutDefaults
 				default:
-					c.Policy = CtStateTCPTimeoutDefaults
+					defaults = CtStateTCPTimeoutDefaults
 				}
+				c.Policy = make(CtStatePolicyTimeout, len(defaults))
+				for k, v := range defaults {
+					c.Policy[k] = v
+				}
+			}
+
+			for decoder.Next() {
 				c.Policy[decoder.Type()-1] = decoder.Uint32()
+			}
+			if err := decoder.Err(); err != nil {
+				return fmt.Errorf("ct timeout policy: %w", err)
 			}
 		}
 	}
